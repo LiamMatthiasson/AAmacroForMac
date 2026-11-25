@@ -27,6 +27,9 @@ enum Region {
     /// "Wave 26" under the stage title (the "+1132" pearls line below it is excluded).
     static let waveCounter    = CGRect(x: 0.22, y: 0.08, width: 0.20, height: 0.14)    // "Wave 15" (moves down when a boss bar shows)
 
+    /// The "Return to lobby" / "Replay" row across the top of the post-match screen.
+    static let endScreenButtons = CGRect(x: 0.22, y: 0.15, width: 0.56, height: 0.25)
+
     // Weather card vote ("The weather shifts…"): 3 cards, then a Vote button.
     static let cardScreen     = CGRect(x: 0.30, y: 0.24, width: 0.40, height: 0.07)   // "The weather shifts…"
     static let cardArea       = CGRect(x: 0.23, y: 0.33, width: 0.56, height: 0.40)

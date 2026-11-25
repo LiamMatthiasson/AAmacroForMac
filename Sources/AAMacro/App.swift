@@ -25,6 +25,8 @@ struct AAMacroApp: App {
                     // and its Fix button asks only when something is actually missing.
                     engine.store = store
                     recorder.store = store
+                    // Load the text models now, in the background — see OCRWarmup.
+                    OCRWarmup.begin { msg in engine.say(msg) }
                     Hotkeys.shared.install(engine: engine, recorder: recorder)
                     DockPanel.shared.show(engine: engine, recorder: recorder, store: store)
                 }

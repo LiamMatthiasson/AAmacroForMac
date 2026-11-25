@@ -91,7 +91,8 @@ extension MacroEngine {
             }
         }
         if !rewardSeen.isEmpty, !secretFoundThisMatch {
-            say("Reward screens: \(rewardSeen.sorted().joined(separator: " · "))")
+            let shown = rewardSeen.sorted().prefix(6).joined(separator: " · ")
+            say("Reward screens: \(shown)\(rewardSeen.count > 6 ? " …(+\(rewardSeen.count - 6))" : "")")
         }
 
         sawResultPanel = false
@@ -201,14 +202,26 @@ extension MacroEngine {
                      || $0.contains("useifstuck") || $0.contains("disableautoopen") }
     }
 
+    /// Where the "Return to lobby" button is, if it is on screen.
+    ///
+    /// The quick reader is not good enough for this one: on the post-match screen it read 42
+    /// lines where the accurate reader read 64, and this button was among the ones it dropped —
+    /// which left the macro circling the end screen for 24 minutes. So when the quick read
+    /// misses it, its own strip is re-read accurately. That strip is a twelfth of the window,
+    /// so the extra read is cheap.
+    func returnToLobbyButton(_ img: CGImage, quickLines: [OCR.Line]? = nil) -> NormPoint? {
+        let quick = quickLines ?? ((try? OCR.read(img, fast: true)) ?? [])
+        if let hit = quick.first(where: { OCR.norm($0.text).contains("returntolobby") }) { return hit.center }
+        guard let strip = try? OCR.read(img, region: Region.endScreenButtons) else { return nil }
+        return strip.first { OCR.norm($0.text).contains("returntolobby") }?.center
+    }
+
     func endScreen(in img: CGImage) -> EndScreen? {
         guard let lines = try? OCR.read(img, fast: true) else { return nil }
         let t = lines.map { OCR.norm($0.text) }
         if Self.isSettingsMenu(t) { return nil }
         // "Return to lobby" (top centre, next to Replay) — the last step.
-        if let back = lines.first(where: { OCR.norm($0.text).contains("returntolobby") }) {
-            return .lobbyButton(back.center)
-        }
+        if let back = returnToLobbyButton(img, quickLines: lines) { return .lobbyButton(back) }
         // The VICTORY!!! / DEFEAT panel, with its "Next" button.
         let isWin = t.contains { w in Self.winWords.contains { w.contains($0) } }
         // The stylised DEFEAT/VICTORY art is often unreadable; the panel's own lines aren't.
@@ -294,8 +307,10 @@ extension MacroEngine {
     /// reader, which garbles the small stylised rarity text under an item's name.
     func checkForSecret(_ img: CGImage) {
         guard let lines = try? OCR.read(img) else { return }
-        // Everything right of 0.84 is the level-modifier panel, never a drop.
-        for l in lines where l.box.midX < 0.84 {
+        // Right of 0.84 is the level-modifier panel and below 0.86 is the hotbar — the unit
+        // names down there ("Phoenix (Mythic Flames)") are the team, not drops, and they filled
+        // the log with nonsense on the first run.
+        for l in lines where l.box.midX < 0.84 && l.box.midY < 0.86 {
             let t = OCR.norm(l.text)
             guard Self.dropWords.contains(where: { t.contains($0) }), !Self.isRateText(l.text) else { continue }
             let clean = l.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -309,7 +324,7 @@ extension MacroEngine {
         guard !secretFoundThisMatch else { return }
         let hit = lines.first { l in
             let t = OCR.norm(l.text)
-            guard t.contains("secret"), l.box.midX < 0.84 else { return false }
+            guard t.contains("secret"), l.box.midX < 0.84, l.box.midY < 0.86 else { return false }
             return !Self.isRateText(l.text)
         }
         guard let hit else { return }

@@ -13,7 +13,8 @@ extension MacroEngine {
         if captured == nil { captured = try? await ScreenCapture.captureRoblox() }
         guard let img = captured, let lines = try? OCR.read(img, fast: true) else { return false }
         let text = lines.map { OCR.norm($0.text) }
-        let protected = ["enterthistext", "joinmatchmaking", "findmatch", "votestart", "weathershifts", "voteends"]
+        let protected = ["enterthistext", "joinmatchmaking", "findmatch", "votestart", "weathershifts",
+                          "voteends", "wheredoyouwant"]
         if text.contains(where: { t in protected.contains { t.contains($0) } }) { return false }
         // Ignore the left HUD buttons (Units, Store, …) and the hotbar.
         let candidates = lines.filter { l in
@@ -71,53 +72,212 @@ extension MacroEngine {
     func doLobby() async throws {
         say("Lobby: looking for Play")
         runDeadline = Date().addingTimeInterval(Double((store?.settings.stuckMinutes ?? 45) * 60))
+        var lastEndLook = Date.distantPast
         let play = try await poll(timeout: 90, what: "Play button") { img in
             // Already standing on the pad? Skip straight to matchmaking.
             if try OCR.find("join matchmaking", in: img, region: Region.centerPopup) != nil { return NormPoint(x: -1, y: -1) }
             if try OCR.find("enter this text", in: img, region: Region.centerPopup, fast: true) != nil { return NormPoint(x: -1, y: -1) }
-            return try OCR.find("play", in: img, region: Region.lobbyHUD, exact: true)?.center
+            if let p = try OCR.find("play", in: img, region: Region.lobbyHUD, exact: true)?.center { return p }
+            // Not the lobby at all. Recovery guesses "lobby" whenever it can't place the screen,
+            // and this poll then spent 90 s at a time hunting for a button that could not be
+            // there while the end screen sat in plain sight. Checked every few seconds, not
+            // every frame, so a genuinely slow lobby load still costs nothing.
+            if Date().timeIntervalSince(lastEndLook) > 4 {
+                lastEndLook = Date()
+                if self.returnToLobbyButton(img) != nil { return NormPoint(x: -2, y: -2) }
+            }
+            return nil
+        }
+        if play.x <= -2 {
+            say("Still on the end screen, not the lobby — handing back to the results flow")
+            inStage = true; state = .results; return
         }
         if play.x < 0 { state = .matchmaking; return }
         await input.click(play)
+        await chooseDestination()
         state = .walkToEvent
     }
 
-    /// Summer area: note which map the board says is up, then walk onto the pad.
-    /// Walking stops the moment "Join Matchmaking?" appears, so small timing
-    /// differences don't matter.
-    func doWalkToEvent() async throws {
-        say("Walking to summer event")
-        try await Task.sleep(nanoseconds: lag(3_000_000_000))          // teleport + load
-        func popupUp() async -> Bool {
-            guard let img = try? await ScreenCapture.captureRoblox() else { return false }
-            return (try? OCR.find("join matchmaking", in: img, region: Region.centerPopup, fast: true)) != nil
-                || (try? OCR.find("enter this text", in: img, region: Region.centerPopup, fast: true)) != nil
+    /// The tile this mode farms on UPD 21.5.0's "Where do you want to Play?" chooser, if the
+    /// chooser is actually on screen.
+    ///
+    /// The header is the only trustworthy signal. A looser test that accepted "two of the three
+    /// tile words are visible" clicked "MERCHANT (SUMMER)" in the lobby and two event boards in
+    /// the summer area on its first real run — that whole area is covered in signs saying Summer.
+    func destinationTile(in img: CGImage, fast: Bool = false) -> OCR.Line? {
+        guard let want = (store?.settings.mode ?? .summerHunt).destinationWord,
+              let lines = try? OCR.read(img, region: Region.centerPopup, fast: fast) else { return nil }
+        guard lines.contains(where: { OCR.norm($0.text).contains("wheredoyouwant") }) else { return nil }
+        // Each tile's name is split over two lines, so the word stands alone ("Summer" above
+        // "Event"). Take an exact match; fall back to a loose one only if nothing matches.
+        if let exact = lines.first(where: { OCR.norm($0.text) == want }) { return exact }
+        return lines.first { OCR.norm($0.text).contains(want) }
+    }
+
+    /// Clicks that tile. Waits a few seconds for the chooser, and just carries on if it never
+    /// shows (an older build, or the game went straight to the teleport).
+    @discardableResult
+    func chooseDestination(timeout: Double = 12) async -> Bool {
+        guard (store?.settings.mode ?? .summerHunt).destinationWord != nil else { return false }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if Task.isCancelled { return false }          // F6: never click after Stop
+            if let img = try? await ScreenCapture.captureRoblox(), let tile = destinationTile(in: img) {
+                say("Where to play: choosing \(tile.text.trimmingCharacters(in: .whitespacesAndNewlines))")
+                await input.click(tile.center)
+                try? await Task.sleep(nanoseconds: lag(1_500_000_000))
+                return true
+            }
+            try? await Task.sleep(nanoseconds: lag(500_000_000))
         }
+        return false
+    }
+
+    /// The Misty Village pad asks Day or Night before matchmaking. Matched on exact text:
+    /// the blurb above the tiles ("Open day and night") contains both words.
+    func mistyStagesTiles(in img: CGImage, fast: Bool = false) -> (night: OCR.Line?, day: OCR.Line?)? {
+        guard let lines = try? OCR.read(img, region: Region.centerPopup, fast: fast),
+              lines.contains(where: { OCR.norm($0.text).contains("villagestages") }) else { return nil }
+        return (lines.first { ["nightstages", "night"].contains(OCR.norm($0.text)) },
+                lines.first { ["daystages", "day"].contains(OCR.norm($0.text)) })
+    }
+
+    /// Night stages when they are open, Day otherwise. Whether night is open is settled by
+    /// trying it: if the dialog is still up a moment after clicking Night, that tile was shut
+    /// and Day gets the click. Cheaper than guessing how a closed tile is drawn.
+    @discardableResult
+    func chooseMistyStages(timeout: Double = 15) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var triedNight = false
+        while Date() < deadline {
+            if Task.isCancelled { return false }
+            guard let img = try? await ScreenCapture.captureRoblox(), let tiles = mistyStagesTiles(in: img) else {
+                try? await Task.sleep(nanoseconds: lag(500_000_000)); continue
+            }
+            if (store?.settings.mistyNightStages ?? true), !triedNight, let night = tiles.night {
+                triedNight = true
+                say("Misty Village: trying Night stages")
+                await input.click(night.center)
+                try? await Task.sleep(nanoseconds: lag(1_800_000_000))
+                if let after = try? await ScreenCapture.captureRoblox(), mistyStagesTiles(in: after) == nil {
+                    say("Misty Village: Night stages \u{2713}")
+                    return true
+                }
+                continue                        // dialog still up: night is shut, take day
+            }
+            if let day = tiles.day {
+                say(triedNight ? "Misty Village: Night isn't open yet — taking Day stages"
+                               : "Misty Village: taking Day stages")
+                await input.click(day.center)
+                try? await Task.sleep(nanoseconds: lag(1_500_000_000))
+                return true
+            }
+            try? await Task.sleep(nanoseconds: lag(500_000_000))
+        }
+        say("\u{26a0}\u{fe0f} Misty Village: couldn't pick Day or Night stages")
+        return false
+    }
+
+    /// After Day/Night comes the stage screen — the stage on the left, "Select World" on the
+    /// right, a green Select and a red Cancel at the bottom. Finds Select.
+    ///
+    /// Matched on exact text: the "Select World" panel beside it contains the word too, and
+    /// Cancel sits right next to the button we want.
+    func mistySelectButton(in img: CGImage) -> OCR.Line? {
+        guard let lines = try? OCR.read(img, fast: true) else { return nil }
+        let norms = lines.map { OCR.norm($0.text) }
+        guard norms.contains(where: { $0.contains("unitlevel") || $0.contains("selectworld") }) else { return nil }
+        if let exact = lines.first(where: { OCR.norm($0.text) == "select" }) { return exact }
+        // Tolerate a slightly mangled read, but never "Select World" (too long to match).
+        return lines.first { l in
+            let n = OCR.norm(l.text)
+            return n.count <= 8 && n.hasPrefix("sel")
+        }
+    }
+
+    /// Presses Select on that screen, which brings up "Join Matchmaking?".
+    @discardableResult
+    func confirmMistyStage(timeout: Double = 20) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if Task.isCancelled { return false }
+            guard let img = try? await ScreenCapture.captureRoblox() else {
+                try? await Task.sleep(nanoseconds: lag(500_000_000)); continue
+            }
+            // Already past it (matchmaking is up)? Nothing to press.
+            if (try? OCR.find("join matchmaking", in: img, region: Region.centerPopup, fast: true)) != nil { return true }
+            if let sel = mistySelectButton(in: img) {
+                say("Misty Village: Select")
+                await input.click(sel.center)
+                try? await Task.sleep(nanoseconds: lag(1_800_000_000))
+                return true
+            }
+            try? await Task.sleep(nanoseconds: lag(500_000_000))
+        }
+        say("\u{26a0}\u{fe0f} Misty Village: never saw the stage screen's Select button")
+        return false
+    }
+
+    /// Walk from the spawn onto the mode's pad: Summer's event pad, or Misty Village's event
+    /// tower. Walking stops the moment the next screen appears, so small timing differences
+    /// don't matter.
+    func doWalkToEvent() async throws {
+        let misty = (store?.settings.mode ?? .summerHunt) == .mistyVillage
+        // The sign above each pad. On screen "EVENT TOWER" is usually clipped to "VENT TOWER",
+        // and "venttower" is inside both spellings, so the one word covers it.
+        let signWords = misty ? ["venttower", "playevent"]
+                              : ["summerevent", "summerhunt", "specialrewards"]
+        say(misty ? "Walking to the Misty Village event tower" : "Walking to summer event")
+        try await Task.sleep(nanoseconds: lag(3_000_000_000))          // teleport + load
+
+        /// The pad has done its job: matchmaking is up, or on Misty the Day/Night dialog is.
+        func arrived() async -> Bool {
+            guard let img = try? await ScreenCapture.captureRoblox() else { return false }
+            if (try? OCR.find("join matchmaking", in: img, region: Region.centerPopup, fast: true)) != nil { return true }
+            if (try? OCR.find("enter this text", in: img, region: Region.centerPopup, fast: true)) != nil { return true }
+            if misty, mistyStagesTiles(in: img, fast: true) != nil { return true }
+            return false
+        }
+        func handOver() async {
+            if misty {
+                await chooseMistyStages()        // Day / Night tiles
+                await confirmMistyStage()        // the stage screen's green Select
+            }
+            state = .matchmaking
+        }
+
         // 1) Recorded walk, in 0.3 s slices so we can stop early.
-        for action in store?.settings.lobbyWalk ?? [] {
+        for action in (misty ? store?.settings.mistyWalk : store?.settings.lobbyWalk) ?? [] {
             if case let .walk(k, secs) = action {
                 var left = secs
                 while left > 0 {
-                    if await popupUp() { state = .matchmaking; return }
+                    if await arrived() { await handOver(); return }
                     await input.hold(k, seconds: min(0.3, left)); left -= 0.3
                 }
             }
             if case let .wait(secs) = action { try await Task.sleep(nanoseconds: lag(UInt64(secs * 1e9))) }
         }
-        // 2) Steer toward the "Summer Event" board — the pad sits right under it. Each step:
-        //    read where the board is, strafe (A/D) to keep it centred, then step forward (W).
-        //    Works from any spawn spot and walks around players blocking the way.
+        // 2) Steer toward the sign — the pad sits right under it. Each step: read where the
+        //    sign is, strafe (A/D) to keep it centred, then step forward (W). Works from any
+        //    spawn spot and walks around players blocking the way.
         var lostBoard = 0
         for step in 0..<45 {
-            if await popupUp() { state = .matchmaking; return }
+            if await arrived() { await handOver(); return }
             guard let img = try? await ScreenCapture.captureRoblox() else { continue }
+            // Chooser still up (it appeared late)? Click it and restart the walk from the teleport.
+            if let tile = destinationTile(in: img, fast: true) {
+                say("Where to play: choosing \(tile.text.trimmingCharacters(in: .whitespacesAndNewlines))")
+                await input.click(tile.center)
+                try await Task.sleep(nanoseconds: lag(3_000_000_000))
+                continue
+            }
             let board = (try? OCR.read(img, region: CGRect(x: 0.05, y: 0.05, width: 0.90, height: 0.60), fast: true))?
-                .first { ["summerevent", "summerhunt", "specialrewards"].contains(where: OCR.norm($0.text).contains) }
+                .first { l in signWords.contains(where: OCR.norm(l.text).contains) }
             if let board {
                 lostBoard = 0
                 let off = board.box.midX - 0.5
                 if abs(off) > 0.06 { await input.hold(off > 0 ? "d" : "a", seconds: min(0.6, abs(off) * 2.5)) }
-                // The board grows as we get closer; take smaller steps once it's big.
+                // The sign grows as we get closer; take smaller steps once it's big.
                 await input.hold("w", seconds: board.box.width > 0.15 ? 0.25 : 0.5)
             } else {
                 lostBoard += 1
@@ -126,7 +286,8 @@ extension MacroEngine {
                 await input.hold(lostBoard % 4 == 0 ? (step % 8 < 4 ? "a" : "d") : "w", seconds: 0.3)
             }
         }
-        throw MacroError.timedOut("Join Matchmaking popup (couldn't reach the summer event pad)")
+        throw MacroError.timedOut(misty ? "the Misty Village event tower"
+                                        : "Join Matchmaking popup (couldn't reach the summer event pad)")
     }
 
     /// "Join Matchmaking?" → Find Match → read the code → type it → CHECK it's in the box → Submit.

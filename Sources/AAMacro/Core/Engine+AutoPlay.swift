@@ -38,10 +38,19 @@ extension MacroEngine {
     func cleanTaughtFromBad() {
         guard var prof = activeProfile, let taught = prof.taught, !taught.isEmpty else { return }
         func onTaught(_ p: NormPoint) -> Bool { taught.contains { abs($0.at.x - p.x) < 0.025 && abs($0.at.y - p.y) < 0.035 } }
-        let before = (prof.badGround?.count ?? 0) + (prof.badHill?.count ?? 0) + (prof.suspectGround?.count ?? 0) + (prof.suspectHill?.count ?? 0)
+        // Counted step by step: chaining four `?.count ?? 0` into one sum is more than the
+        // type checker will solve in reasonable time.
+        func marks(_ p: MapProfile) -> Int {
+            var n = p.badGround?.count ?? 0
+            n += p.badHill?.count ?? 0
+            n += p.suspectGround?.count ?? 0
+            n += p.suspectHill?.count ?? 0
+            return n
+        }
+        let before = marks(prof)
         prof.badGround?.removeAll(where: onTaught); prof.badHill?.removeAll(where: onTaught)
         prof.suspectGround?.removeAll(where: onTaught); prof.suspectHill?.removeAll(where: onTaught)
-        let after = (prof.badGround?.count ?? 0) + (prof.badHill?.count ?? 0) + (prof.suspectGround?.count ?? 0) + (prof.suspectHill?.count ?? 0)
+        let after = marks(prof)
         if after < before {
             store?.saveProfile(prof); activeProfile = prof
             say("Cleared \(before - after) wrong 'bad spot' marks that were sitting on your taught spots")
@@ -397,7 +406,10 @@ extension MacroEngine {
                 if try await checkResults() { return phantomSlots }
                 try await handleCards()
                 // One panel open, R pressed repeatedly (waits for money between levels).
-                switch await upgradeUnit(slot: autoPlaced[i].slot, at: autoPlaced[i].at, times: remaining) {
+                // Read the unit out first: subscripting an actor-isolated array directly in an
+                // async call is treated as passing it inout.
+                let unit = autoPlaced[i]
+                switch await upgradeUnit(slot: unit.slot, at: unit.at, times: remaining) {
                 case .some(true):
                     remaining = 0                                    // upgrade() did all it could this round
                     if levels == nil { remaining = 99; misses += 1; if misses > 30 { remaining = 0 } }

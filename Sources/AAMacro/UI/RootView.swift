@@ -62,6 +62,8 @@ struct FullLog: View {
 struct SettingsView: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var recorder: Recorder
+    /// Which walk the recorder is busy with, so two Record buttons can share one Recorder.
+    @State private var recordingMisty = false
 
     var body: some View {
         Form {
@@ -122,7 +124,7 @@ struct SettingsView: View {
             }
             Section("Lobby walk (spawn → summer event)") {
                 Text("\(store.settings.lobbyWalk.count) steps recorded").font(.caption)
-                Button(recorder.isRecording ? "Stop & save lobby walk" : "Record lobby walk") {
+                Button(recorder.isRecording && !recordingMisty ? "Stop & save lobby walk" : "Record lobby walk") {
                     if recorder.isRecording {
                         if let rec = recorder.stop() {
                             store.settings.lobbyWalk = rec.actions
@@ -132,6 +134,29 @@ struct SettingsView: View {
                         recorder.start(mapName: "_lobby_walk")
                     }
                 }
+                .disabled(recorder.isRecording && recordingMisty)
+            }
+            Section("Misty Village") {
+                Toggle("Take Night stages when they're open", isOn: $store.settings.mistyNightStages)
+                Text("Day stages run around the clock; night ones only after dark. It clicks Night first and falls back to Day if that tile is shut.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Walk (spawn → event tower): \(store.settings.mistyWalk.count) steps recorded")
+                    .font(.caption)
+                Button(recorder.isRecording && recordingMisty ? "Stop & save Misty walk" : "Record Misty walk") {
+                    if recorder.isRecording {
+                        if let rec = recorder.stop() {
+                            store.settings.mistyWalk = rec.actions
+                            store.delete(rec)
+                        }
+                        recordingMisty = false
+                    } else {
+                        recordingMisty = true
+                        recorder.start(mapName: "_misty_walk")
+                    }
+                }
+                .disabled(recorder.isRecording && !recordingMisty)
+                Text("Only needed if it can't find the tower by its sign. Stand at the Misty Village spawn, press Record, walk to the tower, press again.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Lifetime stats") {
                 let st = store.stats
@@ -163,6 +188,13 @@ struct SettingsView: View {
 
 struct MapDataView: View {
     @EnvironmentObject var store: Store
+
+    /// Added step by step: as one expression the type checker gives up on it.
+    static func badSpots(_ p: MapProfile) -> Int {
+        var n = p.badGround?.count ?? 0
+        n += p.badHill?.count ?? 0
+        return n
+    }
     @State private var confirmDelete: String?
 
     var body: some View {
@@ -178,7 +210,7 @@ struct MapDataView: View {
                 TableColumn("Taught") { p in Text("\(p.taught?.count ?? 0)") }.width(55)
                 TableColumn("Learned") { p in Text("\(p.learned?.count ?? 0)") }.width(60)
                 TableColumn("Ground / Hill") { p in Text("\(p.ground.count) / \(p.hill.count)") }.width(90)
-                TableColumn("Bad spots") { p in Text("\((p.badGround?.count ?? 0) + (p.badHill?.count ?? 0))") }.width(70)
+                TableColumn("Bad spots") { p in Text("\(Self.badSpots(p))") }.width(70)
                 TableColumn("Hills?") { p in
                     Button(p.noHills == true ? "none ↺" : "yes") {
                         var q = p; q.noHills = (p.noHills == true) ? nil : true; store.saveProfile(q)

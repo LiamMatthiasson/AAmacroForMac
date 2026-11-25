@@ -54,11 +54,25 @@ struct MapRecording: Codable, Identifiable, Hashable {
 /// cards, upgrades, results and recovery are shared. Only Summer Hunt exists so far.
 enum GameMode: String, Codable, CaseIterable, Identifiable {
     case summerHunt = "Summer Hunt"
+    /// Misty Village: its own lobby area, an event tower instead of a pad, and a Day/Night
+    /// choice before matchmaking. Everything after that is the shared flow.
+    case mistyVillage = "Misty Village"
     /// Portals: teach/test tools only for now — Start is blocked until the full mode is built.
     case portal = "Portal"
     /// Dungeons: watch-and-learn only for now (Engine+Dungeon) — Start is blocked.
     case dungeon = "Dungeon"
     var id: String { rawValue }
+
+    /// UPD 21.5.0 added a "Where do you want to Play?" chooser after the Play button
+    /// (Summer Event / Misty Village / Regular Stages). The word on the tile this mode farms,
+    /// or nil for a mode that doesn't go through the chooser.
+    var destinationWord: String? {
+        switch self {
+        case .summerHunt:   return "summer"
+        case .mistyVillage: return "misty"
+        case .portal, .dungeon: return nil
+        }
+    }
 }
 
 /// A recorded right-click walk (spawn → your setup spot) for one map, plus a picture of the view
@@ -163,6 +177,13 @@ struct MacroSettings: Codable {
     var teachMode: Bool = false
     /// Which mode to farm (see GameMode).
     var mode: GameMode = .summerHunt
+    /// Misty Village: take the Night stages whenever they are open, falling back to Day.
+    /// Day stages are open around the clock; night ones only after dark. Turn this off to
+    /// always take Day.
+    var mistyNightStages: Bool = true
+    /// Walk from the Misty Village spawn to the event tower, recorded the same way as lobbyWalk.
+    /// Empty = find the tower by reading its sign.
+    var mistyWalk: [MacroAction] = []
     /// Teach mode only asks you for hill units; ground units are placed automatically.
     var teachHillsOnly: Bool = true
     /// Discord webhook URL for alerts (secrets found, stuck, session summary). Empty = off.
@@ -219,6 +240,8 @@ extension MacroSettings {
         get(.learnWhilePlaying, &learnWhilePlaying)
         get(.teachMode, &teachMode)
         get(.mode, &mode)
+        get(.mistyNightStages, &mistyNightStages)
+        get(.mistyWalk, &mistyWalk)
         get(.teachHillsOnly, &teachHillsOnly)
         get(.discordWebhook, &discordWebhook)
         get(.unitCost, &unitCost)

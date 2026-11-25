@@ -8,7 +8,28 @@ BUNDLE_ID="com.matthiasson.aamacro"
 APP="$HOME/Applications/AAMacro.app"
 
 echo "▸ Building (release)…"
-swift build -c release
+# SwiftPM wants a full Xcode (it asks xcrun for the macOS *platform* path, which the bare
+# Command Line Tools don't have). This package is one executable target with no dependencies,
+# so when that happens we just hand every .swift file to swiftc, which CLT can do fine.
+BUILD_LOG="${TMPDIR:-/tmp}/aamacro-build.log"
+set +e
+swift build -c release 2>&1 | tee "$BUILD_LOG"
+SPM_STATUS=${PIPESTATUS[0]}
+set -e
+if [ "$SPM_STATUS" -ne 0 ]; then
+  if grep -qi "PlatformPath\|show-sdk-platform-path" "$BUILD_LOG"; then
+    echo "▸ No full Xcode found — compiling directly with swiftc instead…"
+    mkdir -p .build/release
+    swiftc -O -wmo \
+      -target "$(uname -m)-apple-macos14.0" \
+      -sdk "$(xcrun --show-sdk-path --sdk macosx)" \
+      -o .build/release/AAMacro \
+      $(find Sources/AAMacro -name '*.swift')
+  else
+    echo "▸ Build failed (see above)."
+    exit 1
+  fi
+fi
 
 echo "▸ Packaging $APP"
 pkill -x AAMacro 2>/dev/null || true

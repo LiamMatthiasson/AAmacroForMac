@@ -155,6 +155,16 @@ enum OCR {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = fast ? .fast : .accurate
         request.usesLanguageCorrection = false            // codes/numbers aren't words
+        // Everything on screen is English, so say so: it saves Vision guessing the language.
+        // (This was first added as the fix for a 68 s freeze on macOS 27. It wasn't — that was the
+        // accurate model compiling on first use, which the benchmark happened to measure on its
+        // first accurate call. See OCRWarmup for the real fix.)
+        request.recognitionLanguages = ["en-US"]
+        // Pin the model revision as well. 3 is today's default, but a macOS update quietly
+        // changing it under us is exactly the kind of thing that broke this.
+        if VNRecognizeTextRequest.supportedRevisions.contains(VNRecognizeTextRequestRevision3) {
+            request.revision = VNRecognizeTextRequestRevision3
+        }
         if let region {
             // Vision uses bottom-left origin; flip our top-left region.
             request.regionOfInterest = CGRect(x: region.minX, y: 1 - region.maxY,

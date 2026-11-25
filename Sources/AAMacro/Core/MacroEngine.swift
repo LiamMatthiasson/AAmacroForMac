@@ -52,9 +52,9 @@ final class MacroEngine: ObservableObject {
             }
             return
         }
-        Discord.send(text, image: image, webhook: hook) { why in
+        Discord.send(text, image: image, webhook: hook) { [weak self] why in
             guard let why else { return }
-            Task { @MainActor [weak self] in self?.say("⚠️ Discord: \(why)") }
+            Task { @MainActor in self?.say("⚠️ Discord: \(why)") }
         }
     }
 
@@ -63,8 +63,8 @@ final class MacroEngine: ObservableObject {
         let hook = (store?.settings.discordWebhook ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !hook.isEmpty else { say("⚠️ Discord: no webhook URL in Settings"); return }
         say("Discord: sending a test message…")
-        Discord.send("💖 AA Macro test message — Discord alerts are working!", webhook: hook) { why in
-            Task { @MainActor [weak self] in
+        Discord.send("💖 AA Macro test message — Discord alerts are working!", webhook: hook) { [weak self] why in
+            Task { @MainActor in
                 self?.say(why.map { "⚠️ Discord test failed: \($0)" } ?? "Discord test message sent ✓")
             }
         }
@@ -216,8 +216,21 @@ final class MacroEngine: ObservableObject {
     }
 
     /// Diagnose button: screenshot + full OCR dump into the logs folder, without running anything.
+    /// Waits, without blocking the window, until OCRWarmup has loaded the text models. Stop / F6
+    /// still work while it waits. Gives up after 3 minutes and lets the caller carry on.
+    func awaitOCR(_ what: String) async {
+        guard !OCRWarmup.ready else { return }
+        say("\(what): text recognition is still loading — waiting for it (about a minute after a macOS update; the window stays usable)")
+        let until = Date().addingTimeInterval(180)
+        while !OCRWarmup.ready, Date() < until, !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        if OCRWarmup.ready { say("\(what): text recognition ready") }
+    }
+
     func diagnose() {
         Task {
+            await awaitOCR("Diagnose")
             say("Diagnose: capturing screen + OCR → logs folder")
             let r = await DebugLog.snapshot("diagnose")
             say(r.contains("Capture failed") ? "⚠️ Diagnose: capture failed (see logs)" : "Diagnose saved")
@@ -293,6 +306,7 @@ final class MacroEngine: ObservableObject {
 
     func runLoop() async {
         state = .lobby
+        await awaitOCR("Start")
         while !Task.isCancelled {
             WindowManager.ensureLocked()          // keeps every run pixel-identical
             do {
@@ -306,7 +320,7 @@ final class MacroEngine: ObservableObject {
                 case .lobby:        try await doLobby()
                 case .walkToEvent:
                     switch store?.settings.mode ?? .summerHunt {
-                    case .summerHunt: try await doWalkToEvent()
+                    case .summerHunt, .mistyVillage: try await doWalkToEvent()
                     case .portal, .dungeon: stop(); return   // never reached: start() blocks these modes
                     }
                 case .matchmaking:  try await doMatchmaking()
@@ -370,9 +384,9 @@ final class MacroEngine: ObservableObject {
         // A results button the end-screen check didn't recognise ("Next", "Return to lobby",
         // "Replay")? Click Next / Return and let the results flow take it from there.
         if let lines = try? OCR.read(img, fast: true), !Self.isSettingsMenu(lines.map { OCR.norm($0.text) }) {
-            if let back = lines.first(where: { OCR.norm($0.text).contains("returntolobby") }) {
+            if let back = returnToLobbyButton(img, quickLines: lines) {
                 say("Recovery: found Return to lobby — clicking it")
-                await input.click(back.center)
+                await input.click(back)
                 inStage = true; state = .results; return
             }
             if let next = lines.first(where: { Self.looksLikeNext($0.text) }) {
